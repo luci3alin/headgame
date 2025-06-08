@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Big Head Football SLK: Haos pe Teren!</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="game-wrapper">
+        <div id="main-menu" class="game-section">
+            <h1>Big Head Football SLK</h1>
+            <button id="single-player-btn">Single Player (vs AI)</button>
+            <button id="multiplayer-btn">Multiplayer (vs Prieten)</button>
+            <button id="tutorial-btn">Tutorial</button>
+        </div>
+
+        <div id="player-selection-menu" class="game-section hidden">
+            <h2>Alege-ți rolul!</h2>
+            <p id="player-selection-status">Alege Jucător 1 (Bulu) sau Jucător 2 (Wizzee)</p>
+            <button id="select-player1-btn">Jucător 1 (Bulu)</button>
+            <button id="select-player2-btn">Jucător 2 (Wizzee)</button>
+            <button id="back-to-main-menu-from-selection" class="in-game-btn">Înapoi la Meniu</button>
+        </div>
+
+        <div id="game-section" class="game-section hidden">
+            <div id="score-board">
+                <span id="player1-score">0</span> - <span id="player2-score">0</span>
+            </div>
+            <canvas id="gameCanvas" width="800" height="400"></canvas>
+            <div id="game-messages">
+                <p id="match-status"></p>
+                <p id="powerup-message" class="hidden"></p>
+                <p id="connection-status-message"></p>
+            </div>
+            <button id="back-to-menu-btn" class="in-game-btn">Înapoi la Meniu</button>
+        </div>
+
+        <div id="tutorial-section" class="game-section hidden">
+            <h2>Tutorial: Big Head Football SLK</h2>
+            <div class="tutorial-content">
+                <h3>Obiectiv:</h3>
+                <p>Marchează mai multe goluri decât adversarul tău pentru a câștiga meciul!</p>
+
+                <h3>Controale:</h3>
+                <div class="controls-grid">
+                    <div>
+                        <h4>Jucător 1 (Bulu):</h4>
+                        <ul>
+                            <li>**W A S D**: Mișcare (W: Săritură, A/D: Stânga/Dreapta)</li>
+                            <li>**C**: Șut puternic</li>
+                            <li>**V**: Skill Special (Bulu Rage)</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <h4>Jucător 2 (Wizzee):</h4>
+                        <ul>
+                            <li>**Săgeți Sus, Jos, Stânga, Dreapta**: Mișcare</li>
+                            <li>**N**: Șut puternic</li>
+                            <li>**M**: Skill Special (Meme Slowmo)</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <h3>Puteri Speciale (Skills):</h3>
+                <ul>
+                    <li>**Skill Bulu (Bulu Rage)**: Bulu lovește mingea cu o forță imensă, trimițând-o rapid spre poarta adversă! (Cooldown: 3 secunde)</li>
+                    <li>**Skill Wizzee (Meme Slowmo)**: Wizzee încetinește mingea adversarului pentru o scurtă perioadă, oferindu-ți timp să te poziționezi! (Cooldown: 3 secunde)</li>
+                </ul>
+
+                <h3>Power-up-ul "Luci":</h3>
+                <p>Un power-up special cu fața lui Luci va apărea aleatoriu pe teren. Dacă îl colectezi, jucătorul tău se va transforma în "Luci" pentru **20 de secunde** sau până la următorul gol. În modul "Luci", jucătorul are:</p>
+                <ul>
+                    <li>Viteză și forță de săritură mărite.</li>
+                    <li>Șuturi mult mai puternice.</li>
+                </ul>
+            </div>
+            <button id="back-to-menu-from-tutorial-btn">Înapoi la Meniu</button>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="game.js"></script>
+</body>
+</html>
