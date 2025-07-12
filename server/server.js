@@ -17,8 +17,22 @@ app.use(express.static(path.join(__dirname, '../public')));
 // IMPORTANT: Această stare trebuie să conțină DOAR date serializabile JSON (primitive, obiecte simple, array-uri).
 // NU OBIECTE COMPLEXE precum Image sau referințe circulare.
 let serverGameState = {
-    player1: { x: 100, y: 350, dx: 0, dy: 0, score: 0, isJumping: false, isGrounded: true, canShoot: true, canSkill: true, isLuci: false, luciTimer: 0, isShooting: false, shotStartTime: 0, skillUses: 0, headRadius: 30, originalHeadRadius: 30, hasBigHead: false, hasSmallHead: false, id: null }, // id-ul va fi setat la conectare
-    player2: { x: 640, y: 350, dx: 0, dy: 0, score: 0, isJumping: false, isGrounded: true, canShoot: true, canSkill: true, isLuci: false, luciTimer: 0, isShooting: false, shotStartTime: 0, skillUses: 0, headRadius: 30, originalHeadRadius: 30, hasBigHead: false, hasSmallHead: false, id: null }, // id-ul va fi setat la conectare
+    player1: {
+        x: 100, y: 350, dx: 0, dy: 0, score: 0, isJumping: false, isGrounded: true,
+        canShoot: true, canSkill: true, isLuci: false, luciTimer: 0, isShooting: false,
+        shotStartTime: 0, skillUses: 0, headRadius: 30, originalHeadRadius: 30,
+        hasBigHead: false, hasSmallHead: false, id: null,
+        isDashing: false, canDash: true, dashCooldownTimer: 0, lastDashTime: 0, // Dash properties
+        activeSkills: [] // Server-side tracking for skill effects
+    },
+    player2: {
+        x: 640, y: 350, dx: 0, dy: 0, score: 0, isJumping: false, isGrounded: true,
+        canShoot: true, canSkill: true, isLuci: false, luciTimer: 0, isShooting: false,
+        shotStartTime: 0, skillUses: 0, headRadius: 30, originalHeadRadius: 30,
+        hasBigHead: false, hasSmallHead: false, id: null,
+        isDashing: false, canDash: true, dashCooldownTimer: 0, lastDashTime: 0, // Dash properties
+        activeSkills: [] // Server-side tracking for skill effects
+    },
     ball: { x: 400, y: 200, radius: 15, dx: 0, dy: 0 },
     gameRunning: false, 
     playersConnected: 0,
@@ -35,11 +49,14 @@ let serverGameState = {
 };
 
 // CONSTANTELE JOCULUI - TREBUIE SĂ FIE SINCROANE CU CELE DIN CLIENT (game.js)!
-const GRAVITY = 0.5;
+const GRAVITY = 0.4; // Synced with client
 const FRICTION = 0.98; 
 const BALL_FRICTION = 0.99;
-const PLAYER_MOVE_SPEED = 3; 
-const PLAYER_JUMP_FORCE = -11; 
+const PLAYER_MOVE_SPEED = 5; // Synced with client
+const PLAYER_JUMP_FORCE = -13; // Synced with client
+const PLAYER_DASH_SPEED = 10; // Synced with client
+const PLAYER_DASH_DURATION = 150; // Synced with client
+const PLAYER_DASH_COOLDOWN = 1000; // Synced with client
 const PLAYER_SHOOT_FORCE_X = 12;
 const PLAYER_SHOOT_FORCE_Y = -10;
 const PLAYER_SKILL_COOLDOWN = 3000; 
@@ -110,7 +127,10 @@ function getCleanGameStateForClient() {
             originalHeadRadius: serverGameState.player1.originalHeadRadius,
             hasBigHead: serverGameState.player1.hasBigHead,
             hasSmallHead: serverGameState.player1.hasSmallHead,
-            id: serverGameState.player1Id // Trimitem socket ID ca string
+            id: serverGameState.player1Id, // Trimitem socket ID ca string
+            isDashing: serverGameState.player1.isDashing,
+            canDash: serverGameState.player1.canDash,
+            activeSkills: serverGameState.player1.activeSkills.map(s => ({ name: s.name, durationTimer: s.durationTimer })) // Only send necessary info
         },
         player2: {
             x: serverGameState.player2.x,
@@ -131,7 +151,10 @@ function getCleanGameStateForClient() {
             originalHeadRadius: serverGameState.player2.originalHeadRadius,
             hasBigHead: serverGameState.player2.hasBigHead,
             hasSmallHead: serverGameState.player2.hasSmallHead,
-            id: serverGameState.player2Id // Trimitem socket ID ca string
+            id: serverGameState.player2Id, // Trimitem socket ID ca string
+            isDashing: serverGameState.player2.isDashing,
+            canDash: serverGameState.player2.canDash,
+            activeSkills: serverGameState.player2.activeSkills.map(s => ({ name: s.name, durationTimer: s.durationTimer })) // Only send necessary info
         },
         ball: {
             x: serverGameState.ball.x,
@@ -161,6 +184,26 @@ function getCleanGameStateForClient() {
 // Toate funcțiile helper și logica de joc sunt definite aici, pentru a fi disponibile.
 
 function updatePlayerPhysicsServer(player) {
+    // Dash Logic
+    if (player.isDashing) {
+        if (Date.now() - player.lastDashTime > PLAYER_DASH_DURATION) {
+            player.isDashing = false;
+            // After dash, if no movement keys are pressed (server doesn't know key state directly,
+            // so we rely on 'stopMove' or subsequent 'move' inputs to set dx).
+            // For now, simply stop movement if dash ends. Client input will override if needed.
+            // player.dx = 0; // This might be too abrupt, consider last input direction or rely on client to send new move
+        }
+    }
+
+    // Dash Cooldown
+    if (!player.canDash) {
+        player.dashCooldownTimer -= (1000 / 60); // Approximate frame time
+        if (player.dashCooldownTimer <= 0) {
+            player.canDash = true;
+            player.dashCooldownTimer = 0;
+        }
+    }
+
     player.dy += GRAVITY;
     player.x += player.dx;
     player.y += player.dy;
@@ -177,14 +220,115 @@ function updatePlayerPhysicsServer(player) {
         player.isGrounded = false; 
     }
 
-    // Fricțiunea pe orizontală este eliminată
-    // player.dx va fi setat la 0 direct de la input (stopMove)
+    // Boundary checks, especially for dashing
     if (player.x < 0) {
-        player.x = 0; player.dx = 0;
+        player.x = 0;
+        if (player.isDashing) player.isDashing = false; // Stop dash at boundary
+        player.dx = 0;
     } else if (player.x + PLAYER_WIDTH > CANVAS_WIDTH) { 
-        player.x = CANVAS_WIDTH - PLAYER_WIDTH; player.dx = 0;
+        player.x = CANVAS_WIDTH - PLAYER_WIDTH;
+        if (player.isDashing) player.isDashing = false; // Stop dash at boundary
+        player.dx = 0;
+    }
+    // Note: Horizontal friction is not applied; movement stops when dx becomes 0 (e.g., from 'stopMove' input or dash end).
+
+    // Apply speed modifications from skills
+    let currentMoveSpeed = PLAYER_MOVE_SPEED;
+    if (player.isLuci) currentMoveSpeed *= LUCI_SKILL_BOOST;
+    if (player.temporaryMoveSpeedMultiplier) { // Applied by OPPONENT_SLOW
+        currentMoveSpeed *= player.temporaryMoveSpeedMultiplier;
+    }
+    // Update dx based on currentMoveSpeed if moving (dx is not 0)
+    if (player.dx !== 0 && !player.isDashing) { // Don't override dash speed
+        player.dx = Math.sign(player.dx) * currentMoveSpeed;
     }
 }
+
+
+function performDashServer(player, direction) {
+    if (!player.canDash || player.isDashing) return;
+
+    player.isDashing = true;
+    player.canDash = false;
+    player.lastDashTime = Date.now();
+    player.dashCooldownTimer = PLAYER_DASH_COOLDOWN;
+    player.dx = direction * PLAYER_DASH_SPEED;
+    // Optional: Add a small vertical boost or change behavior if in air
+    // if (!player.isGrounded) player.dy -= 2;
+}
+
+// --- Server-Side Skill Definitions and Logic ---
+// Defines skills available on the server, their durations, and authoritative effect logic.
+// Effects often involve changing game state and notifying clients.
+const SERVER_SKILLS = {
+    'OPPONENT_SLOW': {
+        name: 'Opponent Slow',
+        duration: 3000,
+        effect: (caster, opponent) => {
+            if (!opponent) return;
+            opponent.temporaryMoveSpeedMultiplier = 0.5;
+            opponent.activeSkills.push({
+                name: 'OPPONENT_SLOW_EFFECT', // Use a different name for the effect itself if needed
+                durationTimer: SERVER_SKILLS['OPPONENT_SLOW'].duration,
+                revertCallback: () => {
+                    delete opponent.temporaryMoveSpeedMultiplier;
+                     io.emit('skillEffectEnded', { playerId: opponent.id, skillName: 'OPPONENT_SLOW' });
+                }
+            });
+            io.emit('skillActivated', { casterId: caster.id, targetId: opponent.id, skillName: 'OPPONENT_SLOW', duration: SERVER_SKILLS['OPPONENT_SLOW'].duration });
+        }
+    },
+    'GOAL_SHIELD': {
+        name: 'Goal Shield',
+        duration: 5000,
+        effect: (caster) => {
+            caster.hasGoalShield = true;
+            caster.activeSkills.push({
+                name: 'GOAL_SHIELD',
+                durationTimer: SERVER_SKILLS['GOAL_SHIELD'].duration,
+                revertCallback: () => {
+                    caster.hasGoalShield = false;
+                    io.emit('skillEffectEnded', { playerId: caster.id, skillName: 'GOAL_SHIELD' });
+                }
+            });
+            io.emit('skillActivated', { casterId: caster.id, skillName: 'GOAL_SHIELD', duration: SERVER_SKILLS['GOAL_SHIELD'].duration });
+        }
+    }
+};
+
+function activateServerSkill(player, skillName) {
+    const skillDefinition = SERVER_SKILLS[skillName];
+    if (!skillDefinition || player.activeSkills.find(s => s.name === skillName || s.name === `${skillName}_EFFECT`)) {
+        console.log(`Server: Skill ${skillName} not found or already active for player ${player.id}`);
+        return;
+    }
+
+    let opponent = null;
+    if (player === serverGameState.player1) {
+        opponent = serverGameState.player2;
+    } else if (player === serverGameState.player2) {
+        opponent = serverGameState.player1;
+    }
+
+    skillDefinition.effect(player, opponent); // Apply the skill's defined effect
+}
+
+// Manages active skill durations on the server and calls revert functions.
+function updateServerActiveSkills(player) {
+    if (!player || !player.activeSkills) return;
+    for (let i = player.activeSkills.length - 1; i >= 0; i--) {
+        const activeSkill = player.activeSkills[i];
+        activeSkill.durationTimer -= (1000 / 60); // Countdown based on server's game loop rate
+
+        if (activeSkill.durationTimer <= 0) {
+            if (activeSkill.revertCallback) { // If a revert function is defined
+                activeSkill.revertCallback();   // Call it to undo skill effects
+            }
+            player.activeSkills.splice(i, 1); // Remove from active skills
+        }
+    }
+}
+
 
 function updateBallPhysicsServer() {
     serverGameState.ball.dy += GRAVITY;
@@ -324,16 +468,44 @@ function checkGoalsServer() {
     const ball = serverGameState.ball;
     const goalLineY = CANVAS_HEIGHT - serverGameState.currentGoalHeight; 
 
+    // Check for Player 1's goal (left side)
     if (ball.x - ball.radius < serverGameState.currentGoalWidth && ball.y > goalLineY) {
-        serverGameState.player2.score++;
-        io.emit('goalScored', { player: 'player2', score: serverGameState.player2.score });
-        serverGameState.gameRunning = false; // Îngheață jocul pe server pentru animația de gol
+        if (!serverGameState.player1.hasGoalShield) { // Check if Player 1's shield is active
+            serverGameState.player2.score++;
+            io.emit('goalScored', { player: 'player2', score: serverGameState.player2.score });
+            serverGameState.gameRunning = false; // Pause game for goal animation
+        } else {
+            // Goal blocked by Player 1's shield
+            io.emit('skillEffectUpdate', { // Notify clients about the block
+                playerId: serverGameState.player1.id,
+                skillName: 'GOAL_SHIELD',
+                message: 'Goal Shield Blocked!',
+                ballDx: ball.dx * -0.5,
+                ballX: serverGameState.currentGoalWidth + ball.radius + 5 // Push ball out
+            });
+            ball.dx *= -0.5; // Reverse ball direction
+            ball.x = serverGameState.currentGoalWidth + ball.radius + 5; // Move ball out of goal
+        }
     }
 
+    // Check for Player 2's goal (right side)
     if (ball.x + ball.radius > CANVAS_WIDTH - serverGameState.currentGoalWidth && ball.y > goalLineY) {
-        serverGameState.player1.score++;
-        io.emit('goalScored', { player: 'player1', score: serverGameState.player1.score });
-        serverGameState.gameRunning = false; // Îngheață jocul pe server pentru animația de gol
+        if (!serverGameState.player2.hasGoalShield) { // Check if Player 2's shield is active
+            serverGameState.player1.score++;
+            io.emit('goalScored', { player: 'player1', score: serverGameState.player1.score });
+            serverGameState.gameRunning = false; // Pause game for goal animation
+        } else {
+            // Goal blocked by Player 2's shield
+             io.emit('skillEffectUpdate', { // Notify clients
+                playerId: serverGameState.player2.id,
+                skillName: 'GOAL_SHIELD',
+                message: 'Goal Shield Blocked!',
+                ballDx: ball.dx * -0.5,
+                ballX: CANVAS_WIDTH - serverGameState.currentGoalWidth - ball.radius - 5 // Push ball out
+            });
+            ball.dx *= -0.5; // Reverse ball direction
+            ball.x = CANVAS_WIDTH - serverGameState.currentGoalWidth - ball.radius - 5; // Move ball out of goal
+        }
     }
 }
 
@@ -343,6 +515,14 @@ function resetServerRound() {
     serverGameState.player1.headRadius = serverGameState.player1.originalHeadRadius; // Resetăm raza capului
     serverGameState.player1.hasBigHead = false; serverGameState.player1.hasSmallHead = false;
     serverGameState.player1.shotStartTime = 0; 
+    serverGameState.player1.isDashing = false;
+    serverGameState.player1.canDash = true;
+    serverGameState.player1.dashCooldownTimer = 0;
+    serverGameState.player1.activeSkills.forEach(skill => skill.revertCallback && skill.revertCallback());
+    serverGameState.player1.activeSkills = [];
+    delete serverGameState.player1.temporaryMoveSpeedMultiplier;
+    delete serverGameState.player1.hasGoalShield;
+
 
     if (serverGameState.player1.isLuci) { endServerLuciPowerUp(serverGameState.player1); }
 
@@ -350,6 +530,14 @@ function resetServerRound() {
     serverGameState.player2.headRadius = serverGameState.player2.originalHeadRadius; // Resetăm raza capului
     serverGameState.player2.hasBigHead = false; serverGameState.player2.hasSmallHead = false;
     serverGameState.player2.shotStartTime = 0; 
+    serverGameState.player2.isDashing = false;
+    serverGameState.player2.canDash = true;
+    serverGameState.player2.dashCooldownTimer = 0;
+    serverGameState.player2.activeSkills.forEach(skill => skill.revertCallback && skill.revertCallback());
+    serverGameState.player2.activeSkills = [];
+    delete serverGameState.player2.temporaryMoveSpeedMultiplier;
+    delete serverGameState.player2.hasGoalShield;
+
     if (serverGameState.player2.isLuci) { endServerLuciPowerUp(serverGameState.player2); }
 
     serverGameState.ball.x = CANVAS_WIDTH / 2; serverGameState.ball.y = CANVAS_HEIGHT / 2; serverGameState.ball.dx = 0; serverGameState.ball.dy = 0;
@@ -607,70 +795,74 @@ function useSkillServer(player) {
 
     if (player.skillUses <= 0) {
         console.log("Server: Player has no skill uses.");
-        io.emit('noSkillUses', { player: player === serverGameState.player1 ? 'player1' : 'player2' }); 
+        io.emit('noSkillUses', { player: player === serverGameState.player1 ? 'player1' : 'player2' });
         return;
     }
 
-    const playerHeadCollisionRadius = player.headRadius;
-    const currentHeadVisualHeight = DEFAULT_HEAD_HEIGHT * (player.hasBigHead ? HEAD_SIZE_FACTOR_LARGE : player.hasSmallHead ? HEAD_SIZE_FACTOR_SMALL : 1);
-    
-    const footBaseY = player.y + currentHeadVisualHeight + PLAYER_GAP_HEAD_FOOT; 
-    
-    let animatedFootX = player.x + PLAYER_WIDTH / 2 - DEFAULT_FOOT_WIDTH / 2;
-    let animatedFootY = footBaseY;
+    player.canSkill = false;
+    setTimeout(() => {
+        player.canSkill = true;
+    }, PLAYER_SKILL_COOLDOWN);
 
-    const kickDuration = PLAYER_SKILL_COOLDOWN; 
-    const animationProgress = (Date.now() - player.shotStartTime) / kickDuration;
-    const clampedProgress = Math.min(1, Math.max(0, animationProgress));
+    player.skillUses--;
+    io.emit('skillUsed', {
+        player: player === serverGameState.player1 ? 'player1' : 'player2',
+        skillUses: player.skillUses // Inform client about skill use and remaining uses
+    });
 
-    const maxArcHeight = currentHeadVisualHeight * 0.8; 
-    const maxArcLateral = PLAYER_WIDTH * 0.7; 
+    // Determine which skill to activate based on the player.
+    // This logic can be expanded for more complex skill assignment.
+    let skillToActivateName = null;
+    if (player === serverGameState.player1) {
+        skillToActivateName = 'OPPONENT_SLOW'; // Player 1 uses Opponent Slow
+    } else if (player === serverGameState.player2) {
+        skillToActivateName = 'GOAL_SHIELD'; // Player 2 uses Goal Shield
+    }
 
-    const effectiveDirection = (player.x < serverGameState.ball.x) ? 1 : -1; 
-
-    const arcYOffset = Math.sin(clampedProgress * Math.PI) * maxArcHeight;
-    const arcXOffset = Math.sin(clampedProgress * Math.PI) * maxArcLateral * effectiveDirection;
-
-    animatedFootX = player.x + PLAYER_WIDTH / 2 - DEFAULT_FOOT_WIDTH / 2 + arcXOffset;
-    animatedFootY = (player.y + currentHeadVisualHeight) - arcYOffset; 
-
-    if (checkRectCircleCollisionServer(animatedFootX, animatedFootY, DEFAULT_FOOT_WIDTH, DEFAULT_FOOT_HEIGHT, serverGameState.ball.x, serverGameState.ball.y, serverGameState.ball.radius)) { 
-
-        player.canSkill = false;
-        player.isShooting = true; 
-        player.shotStartTime = Date.now(); 
-        setTimeout(() => { 
-            player.canSkill = true; 
-            player.isShooting = false; 
-            player.shotStartTime = 0; 
-        }, PLAYER_SKILL_COOLDOWN); 
-
-        player.skillUses--; 
-
-        if (player === serverGameState.player1) { 
-            if (serverGameState.ball) {
-                const directionToBall = serverGameState.ball.x - player.x;
-                serverGameState.ball.dx += Math.sign(directionToBall) * 15;
-                serverGameState.ball.dy -= 10;
-            }
-        } else if (player === serverGameState.player2) { 
-            if (serverGameState.ball) {
-                serverGameState.ball.originalDx = serverGameState.ball.dx;
-                serverGameState.ball.originalDy = serverGameState.ball.dy;
-                serverGameState.ball.dx *= 0.3;
-                serverGameState.ball.dy *= 0.3;
-                setTimeout(() => {
-                    if (serverGameState.ball) {
-                        serverGameState.ball.dx = serverGameState.ball.originalDx;
-                        serverGameState.ball.dy = serverGameState.ball.originalDy;
-                    }
-                }, 1000);
-            }
-        }
-        io.emit('skillUsed', { player: player === serverGameState.player1 ? 'player1' : 'player2', skillUses: player.skillUses }); 
+    if (skillToActivateName) {
+        activateServerSkill(player, skillToActivateName); // Activate the determined skill
     } else {
-        console.log("Server: Mingea nu e în zona piciorului pentru skill valid. Skill not applied.");
-        io.emit('noSkillUses', { player: player === serverGameState.player1 ? 'player1' : 'player2', message: "Skill ratat! Mingea nu era în zonă!" });
+        // Fallback to old hardcoded skills (Bulu Rage, Meme Slowmo) if no new skill is assigned.
+        // This section is for maintaining compatibility or if specific old skills are still desired.
+        console.warn("Server: Using fallback old skill logic for player:", player.id);
+        const playerHeadCollisionRadius = player.headRadius;
+        const currentHeadVisualHeight = DEFAULT_HEAD_HEIGHT * (player.hasBigHead ? HEAD_SIZE_FACTOR_LARGE : player.hasSmallHead ? HEAD_SIZE_FACTOR_SMALL : 1);
+        const footBaseY = player.y + currentHeadVisualHeight + PLAYER_GAP_HEAD_FOOT;
+        let animatedFootX = player.x + PLAYER_WIDTH / 2 - DEFAULT_FOOT_WIDTH / 2;
+        let animatedFootY = footBaseY; // Simplified for server, client handles animation
+
+        // Re-enable shooting animation for old skills if needed, but it's mostly visual
+        // player.isShooting = true;
+        // player.shotStartTime = Date.now();
+        // setTimeout(() => { player.isShooting = false; player.shotStartTime = 0; }, PLAYER_SKILL_COOLDOWN);
+
+
+        if (checkRectCircleCollisionServer(animatedFootX, animatedFootY, DEFAULT_FOOT_WIDTH, DEFAULT_FOOT_HEIGHT, serverGameState.ball.x, serverGameState.ball.y, serverGameState.ball.radius)) {
+            if (player === serverGameState.player1) { // Bulu Rage
+                if (serverGameState.ball) {
+                    const directionToBall = serverGameState.ball.x - player.x;
+                    serverGameState.ball.dx += Math.sign(directionToBall) * 15;
+                    serverGameState.ball.dy -= 10;
+                }
+            } else if (player === serverGameState.player2) { // Meme Slowmo
+                if (serverGameState.ball) {
+                    serverGameState.ball.originalDx = serverGameState.ball.dx;
+                    serverGameState.ball.originalDy = serverGameState.ball.dy;
+                    serverGameState.ball.dx *= 0.3;
+                    serverGameState.ball.dy *= 0.3;
+                    setTimeout(() => {
+                        if (serverGameState.ball) {
+                            serverGameState.ball.dx = serverGameState.ball.originalDx;
+                            serverGameState.ball.dy = serverGameState.ball.originalDy;
+                        }
+                    }, 1000);
+                }
+            }
+        } else {
+            console.log("Server: Fallback skill missed ball collision.");
+            // player.skillUses++; // Optionally refund skill use if old skill missed
+            // io.emit('noSkillUses', { player: player === serverGameState.player1 ? 'player1' : 'player2', message: "Skill (old) ratat! Mingea nu era în zonă!" });
+        }
     }
 }
 
@@ -686,6 +878,8 @@ function serverGameLoop() {
     if (serverGameState.gameRunning) {
         updatePlayerPhysicsServer(serverGameState.player1);
         updatePlayerPhysicsServer(serverGameState.player2);
+        updateServerActiveSkills(serverGameState.player1); // Update active skills for P1
+        updateServerActiveSkills(serverGameState.player2); // Update active skills for P2
         updateBallPhysicsServer();
 
         handlePlayerPlayerCollisionServer(serverGameState.player1, serverGameState.player2); 
@@ -825,6 +1019,8 @@ io.on('connection', (socket) => {
                 shootServer(playerToUpdate);
             } else if (input.type === 'skill') {
                 useSkillServer(playerToUpdate);
+            } else if (input.type === 'dash') {
+                performDashServer(playerToUpdate, input.direction);
             }
         }
     });
@@ -865,8 +1061,22 @@ io.on('connection', (socket) => {
             console.log('Toți jucătorii deconectați. Resetare completă server game state.');
             // Re-inițializăm serverGameState la valorile sale inițiale, inclusiv scorurile
             serverGameState = {
-                player1: { x: 100, y: CANVAS_HEIGHT - PLAYER_HEIGHT, dx: 0, dy: 0, score: 0, isJumping: false, isGrounded: true, canShoot: true, canSkill: true, isLuci: false, luciTimer: 0, isShooting: false, shotStartTime: 0, skillUses: 0, headRadius: PLAYER_HEAD_COLLISION_RADIUS, originalHeadRadius: PLAYER_HEAD_COLLISION_RADIUS, hasBigHead: false, hasSmallHead: false, id: null }, 
-                player2: { x: 640, y: CANVAS_HEIGHT - PLAYER_HEIGHT, dx: 0, dy: 0, score: 0, isJumping: false, isGrounded: true, canShoot: true, canSkill: true, isLuci: false, luciTimer: 0, isShooting: false, shotStartTime: 0, skillUses: 0, headRadius: PLAYER_HEAD_COLLISION_RADIUS, originalHeadRadius: PLAYER_HEAD_COLLISION_RADIUS, hasBigHead: false, hasSmallHead: false, id: null }, 
+                player1: {
+                    x: 100, y: CANVAS_HEIGHT - PLAYER_HEIGHT, dx: 0, dy: 0, score: 0, isJumping: false, isGrounded: true,
+                    canShoot: true, canSkill: true, isLuci: false, luciTimer: 0, isShooting: false,
+                    shotStartTime: 0, skillUses: 0, headRadius: PLAYER_HEAD_COLLISION_RADIUS,
+                    originalHeadRadius: PLAYER_HEAD_COLLISION_RADIUS, hasBigHead: false, hasSmallHead: false, id: null,
+                    isDashing: false, canDash: true, dashCooldownTimer: 0, lastDashTime: 0,
+                    activeSkills: []
+                },
+                player2: {
+                    x: 640, y: CANVAS_HEIGHT - PLAYER_HEIGHT, dx: 0, dy: 0, score: 0, isJumping: false, isGrounded: true,
+                    canShoot: true, canSkill: true, isLuci: false, luciTimer: 0, isShooting: false,
+                    shotStartTime: 0, skillUses: 0, headRadius: PLAYER_HEAD_COLLISION_RADIUS,
+                    originalHeadRadius: PLAYER_HEAD_COLLISION_RADIUS, hasBigHead: false, hasSmallHead: false, id: null,
+                    isDashing: false, canDash: true, dashCooldownTimer: 0, lastDashTime: 0,
+                    activeSkills: []
+                },
                 ball: { x: 400, y: 200, radius: 15, dx: 0, dy: 0 },
                 gameRunning: false, 
                 playersConnected: 0,
