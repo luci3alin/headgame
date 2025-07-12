@@ -41,7 +41,9 @@ const gameState = {
     player2: null, 
     ball: null,    
     
-    gravity: 0.5, 
+    // Player active skills state is now managed within each player object (player.activeSkills)
+
+    gravity: 0.4, // Adjusted for floatier jump
     friction: 0.98, 
     ballFriction: 0.99, 
     
@@ -72,8 +74,11 @@ const gameState = {
 // ---
 
 // 3. Constante și Configurație
-const PLAYER_MOVE_SPEED = 3; 
-const PLAYER_JUMP_FORCE = -11; 
+const PLAYER_MOVE_SPEED = 5; // Increased speed
+const PLAYER_JUMP_FORCE = -13; // Increased jump force
+const PLAYER_DASH_SPEED = 10; // Speed during dash
+const PLAYER_DASH_DURATION = 150; // Dash duration in ms
+const PLAYER_DASH_COOLDOWN = 1000; // Dash cooldown in ms
 const PLAYER_SHOOT_FORCE_X = 12;
 const PLAYER_SHOOT_FORCE_Y = -10;
 const PLAYER_SKILL_COOLDOWN = 3000; 
@@ -284,7 +289,9 @@ function initializeGameEntities() {
         canShoot: true, canSkill: true, isLuci: false, luciTimer: 0, isShooting: false, shotStartTime: 0, skillUses: 0, 
         hasBigHead: false, hasSmallHead: false,
         headImage: buluHeadImage, footImage: buluFootImage, 
-        bigHeadImage: buluBigHeadImage, smallHeadImage: buluSmallHeadImage 
+        bigHeadImage: buluBigHeadImage, smallHeadImage: buluSmallHeadImage,
+        isDashing: false, canDash: true, dashCooldownTimer: 0, lastDashTime: 0,
+        activeSkills: [] // To store currently active skill effects like { name, durationTimer, originalValue }
     };
 
     gameState.player2 = {
@@ -299,7 +306,9 @@ function initializeGameEntities() {
         canShoot: true, canSkill: true, isLuci: false, luciTimer: 0, isShooting: false, shotStartTime: 0, skillUses: 0, 
         hasBigHead: false, hasSmallHead: false,
         headImage: wizzeeHeadImage, footImage: wizzeeFootImage, 
-        bigHeadImage: wizzeeBigHeadImage, smallHeadImage: wizzeeSmallHeadImage 
+        bigHeadImage: wizzeeBigHeadImage, smallHeadImage: wizzeeSmallHeadImage,
+        isDashing: false, canDash: true, dashCooldownTimer: 0, lastDashTime: 0,
+        activeSkills: [] // To store currently active skill effects
     };
 
     gameState.ball = {
@@ -581,6 +590,34 @@ function renderGame() {
 function updatePlayerPhysics(player) {
     if (!player) return; 
 
+    // Dash logic
+    if (player.isDashing) {
+        if (Date.now() - player.lastDashTime > PLAYER_DASH_DURATION) {
+            player.isDashing = false;
+            // Restore normal speed if needed, or rely on keyup to set dx to 0
+            if (!gameState.keys['a'] && !gameState.keys['d'] &&
+                !gameState.keys['ArrowLeft'] && !gameState.keys['ArrowRight']) {
+                 player.dx = 0;
+            } else {
+                // if movement keys are still pressed, revert to normal move speed
+                let moveDirection = 0;
+                if (gameState.keys['a'] || gameState.keys['ArrowLeft']) moveDirection = -1;
+                if (gameState.keys['d'] || gameState.keys['ArrowRight']) moveDirection = 1;
+                player.dx = moveDirection * PLAYER_MOVE_SPEED;
+            }
+        }
+    }
+
+    // Cooldown for dash
+    if (!player.canDash) {
+        player.dashCooldownTimer -= (1000/60); // Approximation for frame time
+        if (player.dashCooldownTimer <= 0) {
+            player.canDash = true;
+            player.dashCooldownTimer = 0;
+        }
+    }
+
+
     player.dy += gameState.gravity;
 
     player.x += player.dx;
@@ -597,13 +634,25 @@ function updatePlayerPhysics(player) {
         player.isGrounded = false; 
     }
 
-    // Fricțiunea pe axa X este eliminată pentru oprire imediată
-    if (player.x < 0) {
-        player.x = 0;
-        player.dx = 0;
-    } else if (player.x + player.width > gameCanvas.width) {
-        player.x = gameCanvas.width - player.width;
-        player.dx = 0;
+    // Fricțiunea pe axa X este eliminată pentru oprire imediată, unless dashing
+    if (!player.isDashing) {
+        if (player.x < 0) {
+            player.x = 0;
+            player.dx = 0;
+        } else if (player.x + player.width > gameCanvas.width) {
+            player.x = gameCanvas.width - player.width;
+            player.dx = 0;
+        }
+    } else { // Boundary checks while dashing
+        if (player.x < 0) {
+            player.x = 0;
+            player.isDashing = false; // Stop dash at boundary
+            player.dx = 0;
+        } else if (player.x + player.width > gameCanvas.width) {
+            player.x = gameCanvas.width - player.width;
+            player.isDashing = false; // Stop dash at boundary
+            player.dx = 0;
+        }
     }
 }
 
@@ -828,34 +877,49 @@ function gameLoop() {
 // 9. Gestionarea Input-ului Jucătorului
 
 function handleKeyDown(event) {
-    gameState.keys[event.key] = true;
+    gameState.keys[event.key.toLowerCase()] = true; // Store keys in lowercase
     
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'w', 'a', 's', 'd', 'c', 'v', 'n', 'm', SKILL_ACTIVATION_KEY].includes(event.key.toLowerCase())) { 
+    // Add 'shift' for dashing
+    if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'w', 'a', 's', 'd', 'c', 'v', 'n', 'm', SKILL_ACTIVATION_KEY, 'shift'].includes(event.key.toLowerCase())) {
         event.preventDefault();
     }
 
+    const currentPlayer = gameState.gameMode === 'singlePlayer' ? gameState.player1 : (gameState.playerNum === 1 ? gameState.player1 : gameState.player2);
+    if (!currentPlayer) return;
+
     if (gameState.gameMode === 'multiplayer') {
         if (!gameState.socket || !gameState.socket.connected || gameState.playerNum === 0) return; 
-
         let inputData = { type: '', playerNum: gameState.playerNum };
-        const currentPlayer = (gameState.playerNum === 1) ? gameState.player1 : gameState.player2;
-
-        if (!currentPlayer) return; 
 
         if (event.key.toLowerCase() === 'w' || event.key.toLowerCase() === 'arrowup') {
-             if (currentPlayer.isGrounded) { 
+             if (currentPlayer.isGrounded && !currentPlayer.isDashing) {
                  inputData.type = 'jump';
                  gameState.socket.emit('playerInput', inputData);
              }
         } else if (event.key.toLowerCase() === 'a' || event.key.toLowerCase() === 'arrowleft') {
-             inputData.type = 'move'; inputData.key = event.key.toLowerCase();
-             gameState.socket.emit('playerInput', inputData);
+             if (!currentPlayer.isDashing) {
+                inputData.type = 'move'; inputData.key = event.key.toLowerCase();
+                gameState.socket.emit('playerInput', inputData);
+             }
         } else if (event.key.toLowerCase() === 'd' || event.key.toLowerCase() === 'arrowright') {
-             inputData.type = 'move'; inputData.key = event.key.toLowerCase();
-             gameState.socket.emit('playerInput', inputData);
+            if (!currentPlayer.isDashing) {
+                inputData.type = 'move'; inputData.key = event.key.toLowerCase();
+                gameState.socket.emit('playerInput', inputData);
+            }
+        } else if (event.key.toLowerCase() === 'shift') {
+            if (currentPlayer.canDash && !currentPlayer.isDashing) {
+                inputData.type = 'dash';
+                // Determine dash direction for multiplayer, client already knows
+                if (gameState.keys['a'] || gameState.keys['arrowleft']) inputData.direction = -1;
+                else if (gameState.keys['d'] || gameState.keys['arrowright']) inputData.direction = 1;
+                else inputData.direction = (currentPlayer === gameState.player1 || (gameState.playerNum === 1 && currentPlayer === gameState.player1)) ? 1 : -1; // Default dash forward if no direction key
+                gameState.socket.emit('playerInput', inputData);
+                // Also apply dash locally for responsiveness, server will confirm/correct
+                performDash(currentPlayer, inputData.direction);
+            }
         } else if (event.key.toLowerCase() === 'c' || event.key.toLowerCase() === 'n') { 
-            const currentPlayer = (gameState.playerNum === 1) ? gameState.player1 : gameState.player2;
             if (currentPlayer.canShoot) {
+                // Local prediction for responsiveness
                 currentPlayer.canShoot = false;
                 currentPlayer.isShooting = true; 
                 currentPlayer.shotStartTime = Date.now(); 
@@ -868,84 +932,213 @@ function handleKeyDown(event) {
                 gameState.socket.emit('playerInput', inputData);
             }
         } else if (event.key.toLowerCase() === SKILL_ACTIVATION_KEY) { 
-            const currentPlayer = (gameState.playerNum === 1) ? gameState.player1 : gameState.player2;
             if (currentPlayer.canSkill) { 
                 if (currentPlayer.skillUses > 0) { 
+                    // Local prediction
                     currentPlayer.canSkill = false;
-                    currentPlayer.isShooting = true; 
-                    currentPlayer.shotStartTime = Date.now(); 
+                    // Omitting isShooting for skill, unless skill has a similar animation
                     setTimeout(() => { 
                         currentPlayer.canSkill = true; 
-                        currentPlayer.isShooting = false; 
-                        currentPlayer.shotStartTime = 0; 
                     }, PLAYER_SKILL_COOLDOWN); 
                     inputData.type = 'skill';
                     gameState.socket.emit('playerInput', inputData);
+                    // Potentially call useSkill locally for immediate feedback if desired,
+                    // but server should be source of truth for skill effects.
                 } else {
                     showGameMessage("Nu ai utilizări de skill!", 'status', 1000); 
                 }
             }
         }
     } else if (gameState.gameMode === 'singlePlayer') {
-        if (event.key.toLowerCase() === 'a' || event.key.toLowerCase() === 'd') {
-            handlePlayerMovement(); 
-        } else if (event.key.toLowerCase() === 'w') {
-            handlePlayerMovement(); 
-        } else if (event.key.toLowerCase() === 'c') {
+        // Single player input handling is now primarily in handlePlayerMovement and shoot/useSkill calls
+        if (event.key.toLowerCase() === 'c') {
             shoot(gameState.player1);
         } else if (event.key.toLowerCase() === SKILL_ACTIVATION_KEY) {
             useSkill(gameState.player1);
+        } else if (event.key.toLowerCase() === 'shift') {
+            if (gameState.player1.canDash && !gameState.player1.isDashing) {
+                 let dashDirection = 0;
+                 if (gameState.keys['a']) dashDirection = -1;
+                 else if (gameState.keys['d']) dashDirection = 1;
+                 else dashDirection = 1; // Default dash forward (right for P1)
+                 performDash(gameState.player1, dashDirection);
+            }
         }
+        // Movement keys (w, a, d) are handled by handlePlayerMovement based on gameState.keys
     }
 }
 
+function performDash(player, direction) {
+    if (!player.canDash || player.isDashing) return;
+
+    player.isDashing = true;
+    player.canDash = false;
+    player.lastDashTime = Date.now();
+    player.dashCooldownTimer = PLAYER_DASH_COOLDOWN;
+
+    player.dx = direction * PLAYER_DASH_SPEED;
+    // Optional: Add a small vertical boost or change behavior if in air
+    // if (!player.isGrounded) player.dy -= 2;
+}
+
+
 function handleKeyUp(event) {
-    gameState.keys[event.key] = false;
+    gameState.keys[event.key.toLowerCase()] = false; // Store keys in lowercase
+
+    const player = gameState.gameMode === 'singlePlayer' ? gameState.player1 : (gameState.playerNum === 1 ? gameState.player1 : gameState.player2);
+    if (!player) return;
 
     if (gameState.gameMode === 'multiplayer') {
         if (!gameState.socket || !gameState.socket.connected || gameState.playerNum === 0) return;
 
-        if (event.key.toLowerCase() === 'a' || event.key.toLowerCase() === 'arrowleft' ||
-            event.key.toLowerCase() === 'd' || event.key.toLowerCase() === 'arrowright') {
-            gameState.socket.emit('playerInput', { type: 'stopMove', playerNum: gameState.playerNum });
+        if (['a', 'arrowleft', 'd', 'arrowright'].includes(event.key.toLowerCase())) {
+            // If not dashing, send stopMove. If dashing, dash will handle dx, or physics update will.
+             if (!player.isDashing) {
+                gameState.socket.emit('playerInput', { type: 'stopMove', playerNum: gameState.playerNum });
+             }
         }
     } else if (gameState.gameMode === 'singlePlayer') {
-        if (event.key.toLowerCase() === 'a' || event.key.toLowerCase() === 'd') {
-            gameState.player1.dx = 0;
+        // Stop movement if corresponding key is up AND not dashing
+        if ((event.key.toLowerCase() === 'a' && !gameState.keys['d']) || (event.key.toLowerCase() === 'd' && !gameState.keys['a'])) {
+            if (!player.isDashing) {
+                 player.dx = 0;
+            }
         }
     }
 }
 
 function handlePlayerMovement() {
-    if (gameState.gameMode === 'singlePlayer') {
-        if (gameState.isPlayer1Local && gameState.player1) { 
-            let currentMoveSpeed = PLAYER_MOVE_SPEED;
-            if (gameState.player1.isLuci) currentMoveSpeed *= LUCI_SKILL_BOOST;
+    // This function will now primarily handle single-player movement based on key states
+    // and also apply to the local player in multiplayer before server correction for responsiveness.
 
-            if (gameState.keys['a']) { 
-                gameState.player1.dx = -currentMoveSpeed; 
-            } else if (gameState.keys['d']) { 
-                gameState.player1.dx = currentMoveSpeed; 
-            } else { 
-                gameState.player1.dx = 0; 
-            }
+    const player = gameState.gameMode === 'singlePlayer' ? gameState.player1 :
+                   (gameState.playerNum === 1 ? gameState.player1 : gameState.player2);
 
-            let currentJumpForce = PLAYER_JUMP_FORCE;
-            if (gameState.player1.isLuci) currentJumpForce *= LUCI_SKILL_BOOST;
-            if (gameState.keys['w'] && gameState.player1.isGrounded) { 
-                gameState.player1.dy = currentJumpForce;
-                gameState.player1.isJumping = true;
-                gameState.player1.isGrounded = false; 
-            }
+    if (!player || player.isDashing) { // Don't interfere with dash movement
+        // If it's the local player in multiplayer and dashing, their dx is set by performDash/updatePlayerPhysics
+        // If it's AI or remote player, server dictates their movement.
+        return;
+    }
+
+    // For single player, or local player in multiplayer (for responsiveness)
+    if (gameState.gameMode === 'singlePlayer' ||
+        (gameState.gameMode === 'multiplayer' && ((gameState.playerNum === 1 && player === gameState.player1) || (gameState.playerNum === 2 && player === gameState.player2)))) {
+
+        let currentMoveSpeed = PLAYER_MOVE_SPEED;
+        if (player.isLuci) currentMoveSpeed *= LUCI_SKILL_BOOST;
+        // Apply temporary speed multiplier from skills like OPPONENT_SLOW (if this player is the one slowed)
+        if (player.temporaryMoveSpeedMultiplier) {
+            currentMoveSpeed *= player.temporaryMoveSpeedMultiplier;
         }
-    } else if (gameState.gameMode === 'multiplayer') {
-        // Mișcarea e dictată de server, clientul doar trimite input.
+
+
+        let targetDx = 0;
+        if (gameState.keys['a'] || gameState.keys['arrowleft']) {
+            targetDx = -currentMoveSpeed;
+        } else if (gameState.keys['d'] || gameState.keys['arrowright']) {
+            targetDx = currentMoveSpeed;
+        }
+        player.dx = targetDx;
+
+        // Jump
+        let currentJumpForce = PLAYER_JUMP_FORCE;
+        if (player.isLuci) currentJumpForce *= LUCI_SKILL_BOOST;
+        if ((gameState.keys['w'] || gameState.keys['arrowup']) && player.isGrounded) {
+            player.dy = currentJumpForce;
+            player.isJumping = true;
+            player.isGrounded = false;
+            // In multiplayer, jump input is sent on keydown. This local application is for responsiveness.
+        }
     }
 }
 
 function processInputActions() {
     // This function is mostly for actions that aren't continuously applied (like move)
+    updateActiveSkills(gameState.player1);
+    updateActiveSkills(gameState.player2);
 }
+
+
+// --- Skill Definitions (Client-side) ---
+// Defines the available skills, their durations, and client-side effects/reversions.
+// Server-side will have its own definitions for authoritative logic.
+const SKILLS = {
+    'OPPONENT_SLOW': {
+        name: 'Opponent Slow',
+        duration: 3000, // 3 seconds
+        effect: (player, opponent) => {
+            if (!opponent) return;
+            const originalSpeed = opponent.originalMoveSpeed || PLAYER_MOVE_SPEED; // Store original if not already slowed
+            opponent.originalMoveSpeed = originalSpeed;
+            opponent.temporaryMoveSpeedMultiplier = 0.5; // Halve speed
+            showGameMessage(`${player === gameState.player1 ? 'Bulu' : 'Wizzee'} slowed down ${opponent === gameState.player1 ? 'Bulu' : 'Wizzee'}!`, 'powerup', 3000);
+        },
+        revert: (player, opponent) => {
+            if (!opponent) return;
+            delete opponent.temporaryMoveSpeedMultiplier;
+            // opponent.moveSpeed = opponent.originalMoveSpeed || PLAYER_MOVE_SPEED; // Redundant if physics uses multiplier
+            delete opponent.originalMoveSpeed;
+            showGameMessage(`${opponent === gameState.player1 ? 'Bulu' : 'Wizzee'}'s speed restored!`, 'status', 1500);
+        }
+    },
+    'GOAL_SHIELD': {
+        name: 'Goal Shield',
+        duration: 5000, // 5 seconds
+        effect: (player) => {
+            // For simplicity, this might be better handled by making the player's own goal temporarily "invincible"
+            // or by creating a temporary invisible wall. Direct goal manipulation is complex with current setup.
+            // For now, let's just display a message. A more visual effect would be ideal.
+            player.hasGoalShield = true;
+            showGameMessage(`${player === gameState.player1 ? 'Bulu' : 'Wizzee'} activated Goal Shield!`, 'powerup', 5000);
+        },
+        revert: (player) => {
+            player.hasGoalShield = false;
+            showGameMessage(`${player === gameState.player1 ? 'Bulu' : 'Wizzee'}'s Goal Shield expired!`, 'status', 1500);
+        }
+    },
+    // Existing skills can be refactored here if desired, or new ones added.
+    // For now, we'll add new ones and keep BuluRage/MemeSlowmo as is for simplicity of this step.
+};
+
+function activateSkill(player, skillName) {
+    const skill = SKILLS[skillName];
+    if (!skill || player.activeSkills.find(s => s.name === skillName)) return; // Skill not found or already active
+
+    let opponent = null;
+    if (gameState.gameMode === 'singlePlayer') {
+        opponent = (player === gameState.player1) ? gameState.player2 : gameState.player1;
+    } else if (gameState.gameMode === 'multiplayer') {
+        // In multiplayer, the server would determine the opponent.
+        // For client-side prediction/effect, we can find the other player.
+        opponent = (player === gameState.player1) ? gameState.player2 : (player === gameState.player2 ? gameState.player1 : null);
+    }
+
+
+    skill.effect(player, opponent);
+    player.activeSkills.push({
+        name: skillName,
+        durationTimer: skill.duration,
+        revertCallback: () => skill.revert(player, opponent) // Store opponent context if needed for revert
+    });
+}
+
+// Manages active skill durations and calls revert functions when they expire.
+function updateActiveSkills(player) {
+    if (!player || !player.activeSkills) return;
+
+    for (let i = player.activeSkills.length - 1; i >= 0; i--) {
+        const activeSkill = player.activeSkills[i];
+        activeSkill.durationTimer -= (1000 / 60); // Approximate frame time countdown
+
+        if (activeSkill.durationTimer <= 0) {
+            if (activeSkill.revertCallback) { // If a revert function is defined for the skill
+                activeSkill.revertCallback(); // Call it
+            }
+            player.activeSkills.splice(i, 1); // Remove skill from active list
+        }
+    }
+}
+
 
 // ---
 
@@ -961,13 +1154,30 @@ function checkGoals() {
     let scorerPlayer = null;
 
     if (ball.x - ball.radius < gameState.currentGoalWidth && ball.y > goalLineY) {
-        gameState.player2.score++;
-        scorerPlayer = 'player2';
-        goalScored = true;
+        // Check if player 1 (owner of left goal) has goal shield
+        if (!(gameState.player1 && gameState.player1.hasGoalShield)) {
+            gameState.player2.score++;
+            scorerPlayer = 'player2';
+            goalScored = true;
+        } else {
+            showGameMessage("Goal Shield blocked the goal!", "powerup", 2000);
+            // Optional: Add visual/audio feedback for shield block
+            // Reverse ball direction slightly
+            ball.dx *= -0.5;
+            ball.x = gameState.currentGoalWidth + ball.radius + 5; // Push out of goal
+        }
     } else if (ball.x + ball.radius > gameCanvas.width - gameState.currentGoalWidth && ball.y > goalLineY) {
-        gameState.player1.score++;
-        scorerPlayer = 'player1';
-        goalScored = true;
+        // Check if player 2 (owner of right goal) has goal shield
+        if (!(gameState.player2 && gameState.player2.hasGoalShield)) {
+            gameState.player1.score++;
+            scorerPlayer = 'player1';
+            goalScored = true;
+        } else {
+            showGameMessage("Goal Shield blocked the goal!", "powerup", 2000);
+            // Optional: Add visual/audio feedback for shield block
+            ball.dx *= -0.5;
+            ball.x = gameCanvas.width - gameState.currentGoalWidth - ball.radius - 5; // Push out of goal
+        }
     }
 
     if (goalScored) {
@@ -1004,7 +1214,14 @@ function resetRound() {
         gameState.player1.headRadius = gameState.player1.originalHeadRadius; 
         gameState.player1.hasBigHead = false; 
         gameState.player1.hasSmallHead = false;
-        gameState.player1.skillUses = 0; 
+        gameState.player1.skillUses = 0;
+        gameState.player1.isDashing = false;
+        gameState.player1.canDash = true;
+        gameState.player1.dashCooldownTimer = 0;
+        gameState.player1.activeSkills.forEach(skill => skill.revertCallback && skill.revertCallback()); // Revert active skills
+        gameState.player1.activeSkills = [];
+        delete gameState.player1.temporaryMoveSpeedMultiplier; // Ensure reset
+        delete gameState.player1.hasGoalShield;
     }
 
     if (gameState.player2) {
@@ -1019,6 +1236,13 @@ function resetRound() {
         gameState.player2.hasBigHead = false;
         gameState.player2.hasSmallHead = false;
         gameState.player2.skillUses = 0;
+        gameState.player2.isDashing = false;
+        gameState.player2.canDash = true;
+        gameState.player2.dashCooldownTimer = 0;
+        gameState.player2.activeSkills.forEach(skill => skill.revertCallback && skill.revertCallback()); // Revert active skills
+        gameState.player2.activeSkills = [];
+        delete gameState.player2.temporaryMoveSpeedMultiplier; // Ensure reset
+        delete gameState.player2.hasGoalShield;
     }
 
     if (gameState.ball) {
@@ -1284,62 +1508,85 @@ function useSkill(player) {
         return;
     }
 
-    player.canSkill = false; 
-    player.isShooting = true; 
-    player.shotStartTime = Date.now(); 
-    setTimeout(() => { 
-        player.canSkill = true; 
-        player.isShooting = false; 
-        player.shotStartTime = 0; 
-    }, PLAYER_SKILL_COOLDOWN); 
+    player.canSkill = false;
+    setTimeout(() => {
+        player.canSkill = true;
+    }, PLAYER_SKILL_COOLDOWN);
 
-    const currentHeadVisualHeight = player.headRadius * 2; 
-    const footBaseY = player.y + currentHeadVisualHeight + (PLAYER_COLLISION_HEAD_RADIUS * 0.5); 
-    
-    const kickDuration = PLAYER_SKILL_COOLDOWN; 
-    const animationProgress = (Date.now() - player.shotStartTime) / kickDuration;
-    const clampedProgress = Math.min(1, Math.max(0, animationProgress));
+    player.skillUses--;
 
-    const maxArcHeight = currentHeadVisualHeight * 0.8; 
-    const maxArcLateral = player.width * 0.7; 
+    // Determine which skill to activate. For now, let's assign one new skill to P1 and another to P2.
+    // This part can be expanded for more dynamic skill selection if needed.
+    let skillToActivateName = null;
+    // Assigns specific new skills to Player 1 and Player 2.
+    // In a more complex system, players might choose or be randomly assigned skills.
+    if (player === gameState.player1) {
+        skillToActivateName = 'OPPONENT_SLOW'; // Player 1 gets Opponent Slow
+    } else if (player === gameState.player2) {
+        skillToActivateName = 'GOAL_SHIELD'; // Player 2 gets Goal Shield
+    }
 
-    const effectiveDirection = (player === gameState.player1) ? 1 : -1;
-
-    const arcYOffset = Math.sin(clampedProgress * Math.PI) * maxArcHeight;
-    const arcXOffset = Math.sin(clampedProgress * Math.PI) * maxArcLateral * effectiveDirection;
-
-    const animatedFootX = player.x + player.width / 2 - DEFAULT_FOOT_WIDTH / 2 + arcXOffset;
-    const animatedFootY = (player.y + currentHeadVisualHeight) - arcYOffset; 
-
-    if (checkRectCircleCollision(animatedFootX, animatedFootY, DEFAULT_FOOT_WIDTH, DEFAULT_FOOT_HEIGHT, gameState.ball.x, gameState.ball.y, gameState.ball.radius)) { 
-
-        player.skillUses--; 
-
-        if (player === gameState.player1) { 
-            showGameMessage(`Bulu a folosit Bulu Rage! Utilizări rămase: ${player.skillUses}`, 'status', 2000);
-            if (gameState.ball) {
-                const directionToBall = gameState.ball.x - player.x;
-                gameState.ball.dx += Math.sign(directionToBall) * 15;
-                gameState.ball.dy -= 10;
-            }
-        } else if (player === gameState.player2) { 
-            showGameMessage(`Wizzee a folosit Meme Slowmo! Utilizări rămase: ${player.skillUses}`, 'status', 2000);
-            if (gameState.ball) {
-                gameState.ball.originalDx = gameState.ball.dx;
-                gameState.ball.originalDy = gameState.ball.dy;
-                gameState.ball.dx *= 0.3;
-                gameState.ball.dy *= 0.3;
-                setTimeout(() => {
-                    if (gameState.ball) {
-                        gameState.ball.dx = gameState.ball.originalDx;
-                        gameState.ball.dy = gameState.ball.originalDy;
-                    }
-                }, 1000);
-            }
+    if (skillToActivateName) {
+        activateSkill(player, skillToActivateName); // Activates the new skill system
+        // For multiplayer, skill activation signal is sent on keydown.
+        // The server will be the source of truth for applying skill effects.
+        // Client-side activation via activateSkill() provides immediate feedback in single-player
+        // and can serve as a visual prediction in multiplayer before server confirmation.
+        if (gameState.gameMode === 'singlePlayer') {
+             console.log(`${player === gameState.player1 ? "Bulu" : "Wizzee"} used ${skillToActivateName}. Uses left: ${player.skillUses}`);
         }
     } else {
-        console.log("Client: Mingea nu e în zona piciorului pentru skill valid. Skill not applied.");
-        showGameMessage("Skill ratat! Mingea nu era în zonă!", 'status', 1500);
+        // Fallback to old hardcoded skills (Bulu Rage, Meme Slowmo) if no new skill is assigned above.
+        // This section can be removed if the new skills fully replace the old ones.
+        console.warn("Using fallback old skill logic for player:", player);
+        player.isShooting = true; // Trigger animation for old skills
+        player.shotStartTime = Date.now();
+        setTimeout(() => {
+            player.isShooting = false;
+            player.shotStartTime = 0;
+        }, PLAYER_SKILL_COOLDOWN); // Use skill cooldown for animation duration of old skills
+
+        const currentHeadVisualHeight = player.headRadius * 2;
+        const footBaseY = player.y + currentHeadVisualHeight + (PLAYER_COLLISION_HEAD_RADIUS * 0.5);
+        const kickDuration = PLAYER_SKILL_COOLDOWN;
+        const animationProgress = (Date.now() - player.shotStartTime) / kickDuration;
+        const clampedProgress = Math.min(1, Math.max(0, animationProgress));
+        const maxArcHeight = currentHeadVisualHeight * 0.8;
+        const maxArcLateral = player.width * 0.7;
+        const effectiveDirection = (player === gameState.player1) ? 1 : -1;
+        const arcYOffset = Math.sin(clampedProgress * Math.PI) * maxArcHeight;
+        const arcXOffset = Math.sin(clampedProgress * Math.PI) * maxArcLateral * effectiveDirection;
+        const animatedFootX = player.x + player.width / 2 - DEFAULT_FOOT_WIDTH / 2 + arcXOffset;
+        const animatedFootY = (player.y + currentHeadVisualHeight) - arcYOffset;
+
+        if (checkRectCircleCollision(animatedFootX, animatedFootY, DEFAULT_FOOT_WIDTH, DEFAULT_FOOT_HEIGHT, gameState.ball.x, gameState.ball.y, gameState.ball.radius)) {
+            if (player === gameState.player1) {
+                showGameMessage(`Bulu a folosit Bulu Rage! Utilizări rămase: ${player.skillUses}`, 'status', 2000);
+                if (gameState.ball) {
+                    const directionToBall = gameState.ball.x - player.x;
+                    gameState.ball.dx += Math.sign(directionToBall) * 15;
+                    gameState.ball.dy -= 10;
+                }
+            } else if (player === gameState.player2) {
+                showGameMessage(`Wizzee a folosit Meme Slowmo! Utilizări rămase: ${player.skillUses}`, 'status', 2000);
+                if (gameState.ball) {
+                    gameState.ball.originalDx = gameState.ball.dx;
+                    gameState.ball.originalDy = gameState.ball.dy;
+                    gameState.ball.dx *= 0.3;
+                    gameState.ball.dy *= 0.3;
+                    setTimeout(() => {
+                        if (gameState.ball) {
+                            gameState.ball.dx = gameState.ball.originalDx;
+                            gameState.ball.dy = gameState.ball.originalDy;
+                        }
+                    }, 1000);
+                }
+            }
+        } else {
+            console.log("Client: Mingea nu e în zona piciorului pentru skill (old) valid. Skill not applied.");
+            showGameMessage("Skill (old) ratat! Mingea nu era în zonă!", 'status', 1500);
+            player.skillUses++; // Return skill use if old skill missed
+        }
     }
 }
 
